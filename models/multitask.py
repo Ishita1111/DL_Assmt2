@@ -24,9 +24,9 @@ class MultiTaskPerceptionModel(nn.Module):
 
         # 3. Download the files via gdown 
         print("Downloading weights from Google Drive...")
-        gdown.download(id="1fwQn62hYGGhZjxMtoxMO5BaqgesjhRy1", output=classifier_path, quiet=False)
-        gdown.download(id="1QTniV0lgu7ho1HY2EOdpyIwDguHeRg3c", output=localizer_path, quiet=False)
-        gdown.download(id="1GZYoxunNcZ5U9ne_jVgdXBrYQAa12U_F", output=unet_path, quiet=False)
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a", output=classifier_path, quiet=False)
+        gdown.download(id="10g0EduM3-vnuTBrvQh33LIhRUSVzcgug", output=localizer_path, quiet=False)
+        gdown.download(id="1DIBo-YerVcDUluFtqaMeKzR8f74Btcy4", output=unet_path, quiet=False)
             
         # 4. FORCE LOAD THE WEIGHTS
         print("Loading weights into model...")
