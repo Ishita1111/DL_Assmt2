@@ -209,7 +209,7 @@ def main():
         project="da6401-assignment-2",
         config={
             "learning_rate": 1e-4,
-            "epochs": 50, # ---> UPGRADED: Let the model train longer! <---
+            "epochs": 20,
             "batch_size": 16,
             "architecture": "VGG11-UNet-MultiTask"
         }
