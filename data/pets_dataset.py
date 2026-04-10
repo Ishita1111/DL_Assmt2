@@ -143,19 +143,19 @@ def get_dataloaders(root_dir, batch_size=16):
     train_dataset.samples = [train_dataset.samples[i] for i in train_indices]
     val_dataset.samples = [val_dataset.samples[i] for i in val_indices]
     
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    
-    # return train_loader, val_loader
-
-    # ---------------------------------
-    # --- TEMPORARY DEBUGGING BLOCK ---
-    # Keep only 100 images for training and 20 for validation
-    train_dataset.samples = train_dataset.samples[:100]
-    val_dataset.samples = val_dataset.samples[:20]
-    # ---------------------------------
-    
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
     
     return train_loader, val_loader
+
+    # ---------------------------------
+    # --- TEMPORARY DEBUGGING BLOCK ---
+    # Keep only 100 images for training and 20 for validation
+    # train_dataset.samples = train_dataset.samples[:100]
+    # val_dataset.samples = val_dataset.samples[:20]
+    # ---------------------------------
+    
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
+    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+    
+    # return train_loader, val_loader

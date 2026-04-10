@@ -36,6 +36,7 @@ from experiments.utils import (
 DATA_PATH  = "./data/oxford-iiit-pet"
 BATCH_SIZE = 16
 PROJECT    = "da6401-assignment-2"
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ===========================================================================
@@ -363,8 +364,16 @@ def task_2_3():
 # TASK 2.4 — Inside the Black Box: Feature Maps
 # ===========================================================================
 
-def task_2_4(checkpoint_path="checkpoints/classifier.pth",
+def task_2_4(checkpoint_path=os.path.join(_PROJECT_ROOT, "checkpoints", "classifier.pth"),
              dog_image_path=None):
+    
+    # Download weights if not already present
+    import gdown
+    os.makedirs(os.path.join(_PROJECT_ROOT, "checkpoints"), exist_ok=True)
+    
+    if not os.path.exists(checkpoint_path):
+        print("Downloading classifier.pth from Google Drive...")
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a", output=checkpoint_path, quiet=False)
     """
     Loads the trained VGG11Classifier, passes a single dog image through it,
     extracts and visualises feature maps from:
@@ -552,21 +561,283 @@ def task_2_4(checkpoint_path="checkpoints/classifier.pth",
     print("Task 2.4 complete. Feature maps logged to W&B.")
     wandb.finish()
 
-
 # ===========================================================================
-# TASK 2.5  — (placeholder)
-# ===========================================================================
-
-def task_2_5():
-    raise NotImplementedError("Task 2.5 not yet implemented.")
-
-
-# ===========================================================================
-# TASK 2.6  — (placeholder)
+# TASK 2.5 — Object Detection: Confidence & IoU
 # ===========================================================================
 
-def task_2_6():
-    raise NotImplementedError("Task 2.6 not yet implemented.")
+def task_2_5(n_images=15):
+    print("\n" + "="*60)
+    print("TASK 2.5 — Object Detection: Confidence & IoU")
+    print("="*60)
+
+    import gdown
+    from PIL import Image, ImageDraw
+    from models.vgg11 import VGG11Backbone
+    from models.localization import RegressionHead
+
+    device = get_device()
+    print(f"Device: {device}")
+
+    # --- Download & load weights ---
+    ckpt_dir  = os.path.join(_PROJECT_ROOT, "checkpoints")
+    ckpt_path = os.path.join(ckpt_dir, "localizer.pth")
+    cls_path  = os.path.join(ckpt_dir, "classifier.pth")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    if not os.path.exists(cls_path):
+        print("Downloading classifier.pth...")
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a", output=cls_path, quiet=False)
+    if not os.path.exists(ckpt_path):
+        print("Downloading localizer.pth...")
+        gdown.download(id="10g0EduM3-vnuTBrvQh33LIhRUSVzcgug", output=ckpt_path, quiet=False)
+
+    backbone = VGG11Backbone()
+    backbone.load_state_dict(torch.load(cls_path, map_location="cpu")['backbone'])
+    locator = RegressionHead()
+    locator.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
+    backbone = backbone.to(device).eval()
+    locator  = locator.to(device).eval()
+
+    _, val_loader = get_dataloaders(root_dir=DATA_PATH, batch_size=1)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+
+    def compute_iou(pred_px, gt_px):
+        def to_xyxy(b):
+            return b[0]-b[2]/2, b[1]-b[3]/2, b[0]+b[2]/2, b[1]+b[3]/2
+        px1,py1,px2,py2 = to_xyxy(pred_px)
+        gx1,gy1,gx2,gy2 = to_xyxy(gt_px)
+        inter = max(0, min(px2,gx2)-max(px1,gx1)) * max(0, min(py2,gy2)-max(py1,gy1))
+        union = (px2-px1)*(py2-py1) + (gx2-gx1)*(gy2-gy1) - inter
+        return inter / (union + 1e-6)
+
+    def draw_boxes(img_t, pred_px, gt_px):
+        img_pil = Image.fromarray(
+            ((img_t * std + mean).clamp(0,1).permute(1,2,0).numpy() * 255).astype(np.uint8)
+        )
+        draw = ImageDraw.Draw(img_pil)
+        W, H = img_pil.size
+        def box(b): return [max(0,int(b[0]-b[2]/2)), max(0,int(b[1]-b[3]/2)),
+                             min(W,int(b[0]+b[2]/2)), min(H,int(b[1]+b[3]/2))]
+        draw.rectangle(box(gt_px),   outline="green", width=3)
+        draw.rectangle(box(pred_px), outline="red",   width=3)
+        return img_pil
+
+    wandb.init(project=PROJECT, name="task2_5_detection_iou",
+               group="task2_5_object_detection",
+               config={"n_images": n_images}, reinit=True)
+
+    table = wandb.Table(columns=["Image", "IoU", "Confidence",
+                                  "Pred [cx,cy,w,h]", "GT [cx,cy,w,h]", "Failure?"])
+    all_ious, count = [], 0
+
+    with torch.no_grad():
+        for img_t, _, bbox_gt, _ in val_loader:
+            if count >= n_images: break
+            bottleneck, _ = backbone(img_t.to(device))
+            pred_norm = locator(bottleneck)[0].cpu()   # [4] normalized
+
+            H = W = 224
+            pred_px = [pred_norm[0]*W, pred_norm[1]*H, pred_norm[2]*W, pred_norm[3]*H]
+            gt_norm = bbox_gt[0].cpu().tolist()
+            gt_px   = [gt_norm[0]*W,   gt_norm[1]*H,   gt_norm[2]*W,   gt_norm[3]*H]
+
+            iou = compute_iou(pred_px, gt_px)
+            l1  = float(torch.abs(pred_norm - bbox_gt[0].cpu()).mean())
+            confidence = round(1.0 / (1.0 + l1), 4)
+            is_failure = confidence > 0.6 and iou < 0.3
+
+            img_drawn = draw_boxes(img_t[0].cpu(), pred_px, gt_px)
+            table.add_data(
+                wandb.Image(img_drawn),
+                round(float(iou), 4), confidence,
+                str([round(x,1) for x in pred_px]),
+                str([round(x,4) for x in gt_norm]),
+                "YES ⚠️" if is_failure else "no"
+            )
+            all_ious.append(iou)
+            count += 1
+
+    wandb.log({"task2_5/detection_results_table": table})
+
+    ious_arr = np.array(all_ious)
+    summary  = wandb.Table(columns=["Metric", "Value"])
+    summary.add_data("Mean IoU",            round(float(ious_arr.mean()), 4))
+    summary.add_data("Median IoU",          round(float(np.median(ious_arr)), 4))
+    summary.add_data("mAP@50",              f"{(ious_arr>0.5).sum()}/{len(ious_arr)}")
+    summary.add_data("Worst IoU",           round(float(ious_arr.min()), 4))
+    summary.add_data("Best IoU",            round(float(ious_arr.max()), 4))
+    wandb.log({"task2_5/iou_summary": summary})
+
+    print(f"Task 2.5 complete. {count} images logged to W&B.")
+    wandb.finish()
+
+
+# ===========================================================================
+# TASK 2.6 — Segmentation Evaluation: Dice vs Pixel Accuracy
+# ===========================================================================
+
+def task_2_6(n_images=5):
+    print("\n" + "="*60)
+    print("TASK 2.6 — Segmentation: Dice vs Pixel Accuracy")
+    print("="*60)
+
+    import gdown
+    from models.vgg11 import VGG11Backbone
+    from models.segmentation import UNetDecoder
+
+    device = get_device()
+    print(f"Device: {device}")
+
+    # --- Download & load weights ---
+    ckpt_dir   = os.path.join(_PROJECT_ROOT, "checkpoints")
+    cls_path   = os.path.join(ckpt_dir, "classifier.pth")
+    unet_path  = os.path.join(ckpt_dir, "unet.pth")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    if not os.path.exists(cls_path):
+        print("Downloading classifier.pth...")
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a", output=cls_path, quiet=False)
+    if not os.path.exists(unet_path):
+        print("Downloading unet.pth...")
+        gdown.download(id="1DIBo-YerVcDUluFtqaMeKzR8f74Btcy4", output=unet_path, quiet=False)
+
+    backbone  = VGG11Backbone()
+    backbone.load_state_dict(torch.load(cls_path, map_location="cpu")['backbone'])
+    segmenter = UNetDecoder(num_classes=3)
+    segmenter.load_state_dict(torch.load(unet_path, map_location="cpu"))
+    backbone  = backbone.to(device).eval()
+    segmenter = segmenter.to(device).eval()
+
+    _, val_loader = get_dataloaders(root_dir=DATA_PATH, batch_size=1)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+
+    # Trimap class colours for visualisation: 0=bg, 1=fg, 2=boundary
+    PALETTE = np.array([[0,0,0], [255,255,255], [128,128,128]], dtype=np.uint8)
+
+    def mask_to_rgb(mask_np):
+        """Convert [H,W] class index mask to [H,W,3] RGB using palette."""
+        return PALETTE[mask_np]
+
+    def compute_dice(pred, target, num_classes=3):
+        """Macro Dice over all classes. pred/target: [H,W] numpy arrays."""
+        smooth = 1e-6
+        scores = []
+        for c in range(num_classes):
+            p = (pred == c).astype(float)
+            t = (target == c).astype(float)
+            inter = (p * t).sum()
+            scores.append((2 * inter + smooth) / (p.sum() + t.sum() + smooth))
+        return float(np.mean(scores))
+
+    def compute_pixel_acc(pred, target):
+        return float((pred == target).sum() / target.size)
+
+    # ------------------------------------------------------------------
+    # Run inference and collect per-image metrics
+    # ------------------------------------------------------------------
+    wandb.init(project=PROJECT, name="task2_6_segmentation_dice_vs_pixacc",
+               group="task2_6_segmentation_evaluation",
+               config={"n_images": n_images}, reinit=True)
+
+    # Table: one row per image
+    img_table = wandb.Table(columns=[
+        "Original Image", "Ground Truth Trimap", "Predicted Trimap",
+        "Pixel Accuracy", "Dice Score", "Gap (PA - Dice)"
+    ])
+
+    # Metric accumulators over full val set for curve logging
+    all_pixel_acc, all_dice = [], []
+    count = 0
+
+    with torch.no_grad():
+        for img_t, _, _, seg_gt in val_loader:
+            img_t  = img_t.to(device)
+            seg_gt = seg_gt.to(device)                      # [1, H, W]
+
+            bottleneck, skip = backbone(img_t)
+            seg_logits = segmenter(bottleneck, skip)        # [1, 3, H, W]
+            pred_mask  = seg_logits.argmax(dim=1)           # [1, H, W]
+
+            pred_np = pred_mask[0].cpu().numpy()            # [H, W]
+            gt_np   = seg_gt[0].cpu().numpy()               # [H, W]
+
+            dice     = compute_dice(pred_np, gt_np)
+            pix_acc  = compute_pixel_acc(pred_np, gt_np)
+            all_dice.append(dice)
+            all_pixel_acc.append(pix_acc)
+
+            # Log first n_images visually
+            if count < n_images:
+                # Original image (denormalised)
+                orig_np = ((img_t[0].cpu() * std + mean)
+                           .clamp(0,1).permute(1,2,0).numpy() * 255).astype(np.uint8)
+
+                gt_rgb   = mask_to_rgb(gt_np)
+                pred_rgb = mask_to_rgb(pred_np)
+
+                img_table.add_data(
+                    wandb.Image(orig_np,  caption="Original"),
+                    wandb.Image(gt_rgb,   caption="GT Trimap"),
+                    wandb.Image(pred_rgb, caption="Predicted Trimap"),
+                    round(pix_acc, 4),
+                    round(dice, 4),
+                    round(pix_acc - dice, 4)   # gap — key insight for report
+                )
+                count += 1
+
+    wandb.log({"task2_6/sample_segmentation_table": img_table})
+
+    # ------------------------------------------------------------------
+    # Log Pixel Accuracy vs Dice Score scatter + bar comparison
+    # ------------------------------------------------------------------
+    all_pixel_acc = np.array(all_pixel_acc)
+    all_dice      = np.array(all_dice)
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle("Task 2.6 — Pixel Accuracy vs Dice Score (full val set)", fontsize=12)
+
+    # Scatter: each point = one image
+    ax1 = axes[0]
+    ax1.scatter(all_pixel_acc, all_dice, alpha=0.5, color='steelblue', s=15)
+    ax1.plot([0,1],[0,1], 'r--', linewidth=1, label='PA = Dice line')
+    ax1.set_xlabel("Pixel Accuracy")
+    ax1.set_ylabel("Dice Score")
+    ax1.set_title("PA vs Dice per image\n(points above red = PA inflated)")
+    ax1.legend()
+
+    # Bar: mean comparison
+    ax2 = axes[1]
+    means = [all_pixel_acc.mean(), all_dice.mean()]
+    bars  = ax2.bar(["Pixel Accuracy", "Dice Score"], means,
+                    color=['coral', 'steelblue'], width=0.4)
+    ax2.set_ylim(0, 1)
+    ax2.set_title("Mean over Val Set")
+    ax2.set_ylabel("Score")
+    for bar, val in zip(bars, means):
+        ax2.text(bar.get_x() + bar.get_width()/2, val + 0.01,
+                 f"{val:.3f}", ha='center', fontsize=11)
+
+    plt.tight_layout()
+    wandb.log({"task2_6/pixel_acc_vs_dice_plot": wandb.Image(fig)})
+    plt.savefig("experiments/outputs/task2_6_dice_vs_pixacc.png", dpi=150)
+    plt.close(fig)
+
+    # Summary stats table
+    summary = wandb.Table(columns=["Metric", "Mean", "Std", "Min", "Max"])
+    for name, arr in [("Pixel Accuracy", all_pixel_acc), ("Dice Score", all_dice)]:
+        summary.add_data(name, round(float(arr.mean()),4), round(float(arr.std()),4),
+                         round(float(arr.min()),4), round(float(arr.max()),4))
+    summary.add_data("Gap (PA - Dice)",
+                     round(float((all_pixel_acc - all_dice).mean()), 4),
+                     round(float((all_pixel_acc - all_dice).std()),  4),
+                     round(float((all_pixel_acc - all_dice).min()),  4),
+                     round(float((all_pixel_acc - all_dice).max()),  4))
+    wandb.log({"task2_6/metric_summary": summary})
+
+    print(f"Task 2.6 complete. {count} sample images + full val metrics logged.")
+    wandb.finish()
 
 
 # ===========================================================================
