@@ -255,7 +255,7 @@ def _run_single_dropout_experiment(dropout_p, epochs, lr,
     return train_losses, val_losses
 
 
-def task_2_2(epochs=10, lr=1e-4):
+def task_2_2(epochs=7, lr=1e-4):
     print("\n" + "="*60)
     print("TASK 2.2 — Internal Dynamics: Dropout Generalization Gap")
     print("="*60)
@@ -841,11 +841,208 @@ def task_2_6(n_images=5):
 
 
 # ===========================================================================
-# TASK 2.7  — (placeholder)
+# TASK 2.7 — The Final Pipeline Showcase
 # ===========================================================================
 
-def task_2_7():
-    raise NotImplementedError("Task 2.7 not yet implemented.")
+def task_2_7(image_paths=None):
+    """
+    Runs the full multi-task pipeline on 3 novel in-the-wild pet images.
+    Logs a rich W&B table showing:
+      - Original image
+      - Predicted breed (classification)
+      - Image with predicted bounding box overlaid
+      - Cropped region from bbox (what classifier would see)
+      - Predicted segmentation mask
+      - All numeric outputs
+
+    Args:
+        image_paths: list of 3 local image file paths downloaded from internet.
+                     If None, will raise an error asking you to provide them.
+    """
+    print("\n" + "="*60)
+    print("TASK 2.7 — Final Pipeline Showcase")
+    print("="*60)
+
+    if image_paths is None or len(image_paths) < 3:
+        raise ValueError(
+            "Please provide 3 in-the-wild pet image paths as a list.\n"
+            "Example: task_2_7(image_paths=['dog1.jpg','cat1.jpg','pet3.jpg'])\n"
+            "Download any 3 pet images from the internet first."
+        )
+
+    import gdown
+    import torchvision.transforms as T
+    from PIL import Image, ImageDraw, ImageFont
+
+    from models.vgg11 import VGG11Backbone, ClassificationHead
+    from models.localization import RegressionHead
+    from models.segmentation import UNetDecoder
+
+    # Oxford-IIIT Pet breed names (37 classes, alphabetical order)
+    _, val_loader = get_dataloaders(root_dir=DATA_PATH, batch_size=1)
+    dataset = val_loader.dataset
+
+    idx_to_breed = {}
+    for image_name, class_id in dataset.samples:
+        if class_id not in idx_to_breed:
+            breed = "_".join(image_name.split("_")[:-1]).replace("_", " ").title()
+            idx_to_breed[class_id] = breed
+
+    # Sort by index to get ordered list
+    BREED_NAMES = [idx_to_breed.get(i, f"Class_{i}") for i in range(37)]
+    print("Breeds found:", BREED_NAMES)
+
+    PALETTE = np.array([[0,0,0],[255,255,255],[128,128,128]], dtype=np.uint8)
+
+    device = get_device()
+    print(f"Device: {device}")
+
+    # --- Download & load all weights ---
+    ckpt_dir  = os.path.join(_PROJECT_ROOT, "checkpoints")
+    cls_path  = os.path.join(ckpt_dir, "classifier.pth")
+    loc_path  = os.path.join(ckpt_dir, "localizer.pth")
+    seg_path  = os.path.join(ckpt_dir, "unet.pth")
+    os.makedirs(ckpt_dir, exist_ok=True)
+
+    if not os.path.exists(cls_path):
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a", output=cls_path, quiet=False)
+    if not os.path.exists(loc_path):
+        gdown.download(id="10g0EduM3-vnuTBrvQh33LIhRUSVzcgug", output=loc_path, quiet=False)
+    if not os.path.exists(seg_path):
+        gdown.download(id="1DIBo-YerVcDUluFtqaMeKzR8f74Btcy4", output=seg_path, quiet=False)
+
+    cls_ckpt = torch.load(cls_path, map_location="cpu")
+    backbone  = VGG11Backbone()
+    backbone.load_state_dict(cls_ckpt['backbone'])
+    cls_head  = ClassificationHead(num_classes=37)
+    cls_head.load_state_dict(cls_ckpt['classifier_head'])
+    locator   = RegressionHead()
+    locator.load_state_dict(torch.load(loc_path, map_location="cpu"))
+    segmenter = UNetDecoder(num_classes=3)
+    segmenter.load_state_dict(torch.load(seg_path, map_location="cpu"))
+
+    backbone  = backbone.to(device).eval()
+    cls_head  = cls_head.to(device).eval()
+    locator   = locator.to(device).eval()
+    segmenter = segmenter.to(device).eval()
+    print("All weights loaded.")
+
+    # --- Transforms ---
+    transform = T.Compose([
+        T.Resize((224, 224)),
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406],
+                    std =[0.229, 0.224, 0.225]),
+    ])
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+
+    # --- W&B init ---
+    wandb.init(
+        project=PROJECT,
+        name="task2_7_pipeline_showcase",
+        group="task2_7_final_showcase",
+        config={"n_images": len(image_paths)},
+        reinit=True
+    )
+
+    table = wandb.Table(columns=[
+        "Original Image",
+        "BBox Overlay",
+        "Cropped Head (BBox)",
+        "Segmentation Mask",
+        "Predicted Breed",
+        "Breed Confidence (%)",
+        "Top-3 Breeds",
+        "BBox [cx,cy,w,h px]",
+        "Notes"
+    ])
+
+    with torch.no_grad():
+        for i, img_path in enumerate(image_paths):
+            print(f"\nProcessing image {i+1}: {img_path}")
+            img_pil = Image.open(img_path).convert("RGB")
+            orig_w, orig_h = img_pil.size
+
+            input_t = transform(img_pil).unsqueeze(0).to(device)  # [1,3,224,224]
+
+            # --- Forward pass ---
+            bottleneck, skip = backbone(input_t)
+
+            # 1. Classification
+            cls_logits = cls_head(bottleneck)                      # [1, 37]
+            probs      = torch.softmax(cls_logits, dim=1)[0]
+            top3_vals, top3_idxs = torch.topk(probs, 3)
+            pred_breed      = BREED_NAMES[top3_idxs[0].item()]
+            pred_confidence = round(float(top3_vals[0]) * 100, 2)
+            top3_str = ", ".join([
+                f"{BREED_NAMES[idx.item()]} ({float(v)*100:.1f}%)"
+                for v, idx in zip(top3_vals, top3_idxs)
+            ])
+
+            # 2. Localization
+            bbox_norm = locator(bottleneck)[0].cpu()               # [4] normalized
+            H = W = 224
+            cx = float(bbox_norm[0]) * W
+            cy = float(bbox_norm[1]) * H
+            bw = float(bbox_norm[2]) * W
+            bh = float(bbox_norm[3]) * H
+            x1 = max(0, int(cx - bw/2))
+            y1 = max(0, int(cy - bh/2))
+            x2 = min(W, int(cx + bw/2))
+            y2 = min(H, int(cy + bh/2))
+
+            # 3. Segmentation
+            seg_logits = segmenter(bottleneck, skip)               # [1,3,224,224]
+            seg_mask   = seg_logits.argmax(dim=1)[0].cpu().numpy() # [224,224]
+
+            # --- Visualisations ---
+            # Denormalised 224x224 image as numpy
+            img_224 = ((input_t[0].cpu() * std + mean)
+                       .clamp(0,1).permute(1,2,0).numpy() * 255).astype(np.uint8)
+            img_224_pil = Image.fromarray(img_224)
+
+            # BBox overlay
+            bbox_img = img_224_pil.copy()
+            draw = ImageDraw.Draw(bbox_img)
+            draw.rectangle([x1, y1, x2, y2], outline="red", width=3)
+            draw.text((x1, max(0,y1-12)), pred_breed, fill="red")
+
+            # Cropped head region
+            crop_img = img_224_pil.crop([x1, y1, x2, y2])
+            crop_img = crop_img.resize((112, 112))  # fixed size for display
+
+            # Segmentation mask RGB
+            seg_rgb = Image.fromarray(PALETTE[seg_mask])
+
+            # Simple notes heuristic
+            notes = []
+            if bw < 40 or bh < 40:
+                notes.append("small bbox — possible scale issue")
+            if pred_confidence < 30:
+                notes.append("low breed confidence")
+            if len(notes) == 0:
+                notes.append("clean prediction")
+            notes_str = "; ".join(notes)
+
+            table.add_data(
+                wandb.Image(img_224_pil, caption=f"Image {i+1}"),
+                wandb.Image(bbox_img,    caption=f"BBox: {pred_breed}"),
+                wandb.Image(crop_img,    caption="Cropped head"),
+                wandb.Image(seg_rgb,     caption="Predicted trimap"),
+                pred_breed,
+                pred_confidence,
+                top3_str,
+                f"[{cx:.1f}, {cy:.1f}, {bw:.1f}, {bh:.1f}]",
+                notes_str
+            )
+            print(f"  Breed: {pred_breed} ({pred_confidence}%)")
+            print(f"  BBox:  cx={cx:.1f} cy={cy:.1f} w={bw:.1f} h={bh:.1f}")
+            print(f"  Notes: {notes_str}")
+
+    wandb.log({"task2_7/pipeline_showcase_table": table})
+    print("\nTask 2.7 complete. Results logged to W&B.")
+    wandb.finish()
 
 
 # ===========================================================================
@@ -867,7 +1064,11 @@ TASK_MAP = {
     "2_4": task_2_4,
     "2_5": task_2_5,
     "2_6": task_2_6,
-    "2_7": task_2_7,
+    "2_7": lambda: task_2_7(image_paths=[
+        "/content/dog1.jpg",
+        "/content/cat1.jpg",
+        "/content/pet3.jpg"
+    ]),
     "2_8": task_2_8,
 }
 
