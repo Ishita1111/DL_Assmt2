@@ -351,13 +351,195 @@ def task_2_2(epochs=7, lr=1e-4):
     print("\nTask 2.2 complete. Plots logged to W&B.")
     wandb.finish()
 
-
 # ===========================================================================
-# TASK 2.3  — (placeholder)
+# TASK 2.3 — Transfer Learning Showdown
 # ===========================================================================
 
-def task_2_3():
-    raise NotImplementedError("Task 2.3 not yet implemented.")
+def _run_single_tl_experiment(strategy, epochs, lr, train_loader, val_loader, device):
+    """
+    Trains UNet segmentation under one transfer learning strategy.
+    strategy: 'frozen' | 'partial' | 'full'
+    """
+    import gdown
+    from models.vgg11 import VGG11Backbone
+    from models.segmentation import UNetDecoder
+
+    strategy_names = {
+        'frozen':  'Strict Feature Extractor (Frozen)',
+        'partial': 'Partial Fine-Tuning',
+        'full':    'Full Fine-Tuning'
+    }
+    label = strategy_names[strategy]
+
+    run = wandb.init(
+        project=PROJECT,
+        name=f"task2_3_{strategy}",
+        group="task2_3_transfer_learning_showdown",
+        config={
+            "strategy": strategy,
+            "lr": lr,
+            "epochs": epochs
+        },
+        reinit=True
+    )
+
+    # --- Load pretrained backbone ---
+    ckpt_dir  = os.path.join(_PROJECT_ROOT, "checkpoints")
+    cls_path  = os.path.join(ckpt_dir, "classifier.pth")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    if not os.path.exists(cls_path):
+        print("Downloading classifier.pth...")
+        gdown.download(id="1kXjDJLjXMzz4HIyiUpNIljOr2Gko48_a",
+                       output=cls_path, quiet=False)
+
+    backbone  = VGG11Backbone()
+    backbone.load_state_dict(torch.load(cls_path, map_location="cpu")['backbone'])
+    segmenter = UNetDecoder(num_classes=3)
+
+    # --- Apply freezing strategy ---
+    if strategy == 'frozen':
+        # Freeze entire backbone
+        for param in backbone.parameters():
+            param.requires_grad = False
+
+    elif strategy == 'partial':
+        # Freeze enc1, enc2, enc3 — unfreeze enc4, enc5
+        for block in [backbone.enc1, backbone.pool1,
+                      backbone.enc2, backbone.pool2,
+                      backbone.enc3, backbone.pool3]:
+            for param in block.parameters():
+                param.requires_grad = False
+        for block in [backbone.enc4, backbone.enc5]:
+            for param in block.parameters():
+                param.requires_grad = True
+
+    elif strategy == 'full':
+        # Unfreeze everything
+        for param in backbone.parameters():
+            param.requires_grad = True
+
+    backbone  = backbone.to(device).train()
+    segmenter = segmenter.to(device).train()
+
+    # Count trainable params for logging
+    trainable = sum(p.numel() for p in list(backbone.parameters())
+                    + list(segmenter.parameters()) if p.requires_grad)
+    wandb.config.update({"trainable_params": trainable})
+    print(f"  [{strategy}] Trainable params: {trainable:,}")
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(
+        filter(lambda p: p.requires_grad,
+               list(backbone.parameters()) + list(segmenter.parameters())),
+        lr=lr
+    )
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+
+    def compute_dice(pred, target, num_classes=3):
+        smooth = 1e-6
+        scores = []
+        for c in range(num_classes):
+            p = (pred == c).float()
+            t = (target == c).float()
+            inter = (p * t).sum()
+            scores.append((2*inter + smooth) /
+                          (p.sum() + t.sum() + smooth))
+        return torch.stack(scores).mean()
+
+    import time
+
+    for epoch in range(1, epochs + 1):
+        # --- Train ---
+        backbone.train()
+        segmenter.train()
+        t0 = time.time()
+        tr_loss = 0.0
+
+        for img_t, _, _, seg_gt in train_loader:
+            img_t  = img_t.to(device)
+            seg_gt = seg_gt.to(device).long()
+
+            optimizer.zero_grad()
+            bottleneck, skip = backbone(img_t)
+            seg_logits = segmenter(bottleneck, skip)
+            loss = criterion(seg_logits, seg_gt)
+            loss.backward()
+            optimizer.step()
+            tr_loss += loss.item()
+
+        tr_loss /= len(train_loader)
+        epoch_time = time.time() - t0
+
+        # --- Val ---
+        backbone.eval()
+        segmenter.eval()
+        vl_loss = 0.0
+        vl_dice = 0.0
+        vl_pix  = 0.0
+
+        with torch.no_grad():
+            for img_t, _, _, seg_gt in val_loader:
+                img_t  = img_t.to(device)
+                seg_gt = seg_gt.to(device).long()
+
+                bottleneck, skip = backbone(img_t)
+                seg_logits = segmenter(bottleneck, skip)
+                loss = criterion(seg_logits, seg_gt)
+                vl_loss += loss.item()
+
+                pred_mask = seg_logits.argmax(dim=1)
+                vl_dice  += compute_dice(pred_mask.float(),
+                                         seg_gt.float()).item()
+                vl_pix   += float((pred_mask == seg_gt).float().mean())
+
+        vl_loss /= len(val_loader)
+        vl_dice /= len(val_loader)
+        vl_pix  /= len(val_loader)
+
+        wandb.log({
+            "epoch":            epoch,
+            "train_loss":       tr_loss,
+            "val_loss":         vl_loss,
+            "val_dice":         vl_dice,
+            "val_pixel_acc":    vl_pix,
+            "epoch_time_sec":   epoch_time,
+            "learning_rate":    optimizer.param_groups[0]['lr']
+        })
+
+        print(f"  [{strategy}] Epoch {epoch}/{epochs} "
+              f"tr={tr_loss:.4f} vl={vl_loss:.4f} "
+              f"dice={vl_dice:.4f} pix={vl_pix:.4f} "
+              f"time={epoch_time:.1f}s")
+
+        scheduler.step()
+
+    wandb.finish()
+
+
+def task_2_3(epochs=10, lr=1e-4):
+    print("\n" + "="*60)
+    print("TASK 2.3 — Transfer Learning Showdown")
+    print("="*60)
+
+    device = get_device()
+    print(f"Device: {device}")
+
+    train_loader, val_loader = get_dataloaders(
+        root_dir=DATA_PATH, batch_size=BATCH_SIZE
+    )
+
+    for strategy in ['frozen', 'partial', 'full']:
+        print(f"\n--- Strategy: {strategy} ---")
+        _run_single_tl_experiment(
+            strategy=strategy,
+            epochs=epochs,
+            lr=lr,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            device=device
+        )
+
+    print("\nTask 2.3 complete.")
 
 
 # ===========================================================================
