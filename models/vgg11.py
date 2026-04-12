@@ -2,7 +2,6 @@ import torch.nn as nn
 from .layers import CustomDropout
 
 class VGG11Backbone(nn.Module):
-    # def __init__(self):
     def __init__(self, pretrained=False, use_bn=True):
         super(VGG11Backbone, self).__init__()
         
@@ -52,6 +51,7 @@ class VGG11Backbone(nn.Module):
         self.pool5 = nn.MaxPool2d(kernel_size=2, stride=2)
 
     def forward(self, x):
+        # features[i]: tensor before pool i+1 (used as UNet skips); last map is 7x7 after pool5
         features = []
         x1 = self.enc1(x)
         features.append(x1)
@@ -87,7 +87,7 @@ class ClassificationHead(nn.Module):
             nn.Linear(4096, 4096),
             nn.ReLU(True),
             CustomDropout(p=0.5),
-            nn.Linear(4096, num_classes) #yielding 37class logits
+            nn.Linear(4096, num_classes)
         )
 
     def forward(self, x):

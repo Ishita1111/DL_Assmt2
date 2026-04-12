@@ -11,25 +11,25 @@ class RegressionHead(nn.Module):
             nn.ReLU(True),
             nn.Linear(1024, 256),
             nn.ReLU(True),
-            nn.Linear(256, 4), # [Xcenter, Ycenter, width, height]
-            nn.Sigmoid() # Assuming target coordinates are normalized between 0 and 1
+            # Sigmoid: matches dataset boxes normalized to [0,1] (see pets_dataset)
+            nn.Linear(256, 4),  # cx, cy, w, h
+            nn.Sigmoid()
         )
 
     def forward(self, x):
         return self.regressor(x)
 
-# Added to satisfy the skeleton's models/__init__.py and Task 2 requirements
 class VGG11Localizer(nn.Module):
     def __init__(self, freeze_backbone=False):
         super(VGG11Localizer, self).__init__()
         self.backbone = VGG11Backbone()
         self.locator = RegressionHead()
-        
-        # Task 2 Requirement: Option to freeze backbone weights
+
         if freeze_backbone:
-            for param in self.backbone.parameters():
-                param.requires_grad = False
+            for p in self.backbone.parameters():
+                p.requires_grad = False
 
     def forward(self, x):
-        bottleneck, _ = self.backbone(x) # We don't need skip connections for just localization
+        # localization only needs the bottleneck, not skip tensors
+        bottleneck, _ = self.backbone(x)
         return self.locator(bottleneck)

@@ -1,4 +1,4 @@
-"""Loss package exports for Assignment-2 skeleton."""
+"""Loss helpers (IoU loss for bbox training)."""
 
 from .iou_loss import IoULoss
 

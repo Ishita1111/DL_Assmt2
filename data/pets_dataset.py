@@ -9,12 +9,7 @@ from albumentations.pytorch import ToTensorV2
 
 class OxfordIIITPetDataset(Dataset):
     def __init__(self, root_dir, split='train', transform=None):
-        """
-        Args:
-            root_dir (string): Directory with all the images and annotations.
-            split (string): 'trainval' or 'test'.
-            transform (callable, optional): Optional albumentations transform to be applied.
-        """
+        """Oxford Pets: image + trimap + VOC box. split is trainval or test."""
         self.root_dir = root_dir
         self.split = split
         self.transform = transform
@@ -23,25 +18,22 @@ class OxfordIIITPetDataset(Dataset):
         self.trimaps_dir = os.path.join(root_dir, 'annotations', 'trimaps')
         self.xml_dir = os.path.join(root_dir, 'annotations', 'xmls')
         
-        # Read the split list (trainval.txt or test.txt)
         split_file = os.path.join(root_dir, 'annotations', f'{split}.txt')
         
         self.samples = []
         with open(split_file, 'r') as f:
             for line in f:
-                # Format: Image_Name Class_ID Species Breed_ID
                 parts = line.strip().split()
                 image_name = parts[0]
-                # The dataset uses 1-indexed classes (1-37), we need 0-indexed for PyTorch (0-36)
-                class_id = int(parts[1]) - 1 
-                
-                # Only include samples that actually have a bounding box XML file
+                # official list is 1..37; CrossEntropy wants 0..36
+                class_id = int(parts[1]) - 1
+
                 xml_path = os.path.join(self.xml_dir, f'{image_name}.xml')
                 if os.path.exists(xml_path):
                     self.samples.append((image_name, class_id))
 
     def _parse_xml_bbox(self, xml_path, img_width, img_height):
-        """Parses Pascal VOC XML to extract [cx, cy, w, h] normalized between 0 and 1."""
+        """VOC box -> YOLO-style cx,cy,w,h in [0,1]."""
         tree = ET.parse(xml_path)
         root = tree.getroot()
         bndbox = root.find('.//bndbox')
@@ -51,13 +43,11 @@ class OxfordIIITPetDataset(Dataset):
         xmax = float(bndbox.find('xmax').text)
         ymax = float(bndbox.find('ymax').text)
         
-        # Convert to [Xcenter, Ycenter, width, height]
         w = xmax - xmin
         h = ymax - ymin
         cx = xmin + (w / 2)
         cy = ymin + (h / 2)
         
-        # Normalize coordinates to [0, 1] as expected by your Sigmoid layer in Task 2
         return [cx / img_width, cy / img_height, w / img_width, h / img_height]
 
     def __len__(self):
@@ -66,44 +56,32 @@ class OxfordIIITPetDataset(Dataset):
     def __getitem__(self, idx):
         image_name, class_id = self.samples[idx]
         
-        # 1. Load Image
         img_path = os.path.join(self.images_dir, f'{image_name}.jpg')
         image = np.array(Image.open(img_path).convert('RGB'))
         img_height, img_width = image.shape[:2]
         
-        # 2. Load Trimap (Segmentation Mask)
         trimap_path = os.path.join(self.trimaps_dir, f'{image_name}.png')
-        # Trimap pixels are 1 (Foreground), 2 (Background), 3 (Not classified)
-        # We subtract 1 to make them 0, 1, 2 for PyTorch CrossEntropy
+        # PNG uses 1,2,3 -> 0,1,2 for CE
         trimap = np.array(Image.open(trimap_path)) - 1
-        
-        # 3. Load Bounding Box
+
         xml_path = os.path.join(self.xml_dir, f'{image_name}.xml')
         bbox = self._parse_xml_bbox(xml_path, img_width, img_height)
         
-        # 4. Apply Transformations (Albumentations handles resizing bboxes and masks together)
         if self.transform:
-            # Albumentations expects bounding boxes in a list of lists format
-            # Format 'yolo' strictly matches our [x_center, y_center, width, height] normalized format
+            # yolo = normalized cx,cy,w,h — matches RegressionHead + multitask scaling
             transformed = self.transform(
-                image=image, 
-                mask=trimap, 
-                bboxes=[bbox], 
+                image=image,
+                mask=trimap,
+                bboxes=[bbox],
                 class_labels=[class_id]
             )
             image = transformed['image']
             trimap = transformed['mask']
-            # Extract the single bbox from the list
-            bbox = transformed['bboxes'][0] 
-        
-        # # Convert to Tensors
-        # class_id = torch.tensor(class_id, dtype=torch.long)
-        # bbox = torch.tensor(bbox, dtype=torch.float32)
-        # trimap = torch.tensor(trimap, dtype=torch.long)
-        # Convert to Tensors
+            bbox = transformed['bboxes'][0]
+
         class_id = torch.tensor(class_id, dtype=torch.long)
         bbox = torch.tensor(bbox, dtype=torch.float32)
-        # trimap is already a tensor from ToTensorV2, just cast it to long
+        # mask already tensor from ToTensorV2
         trimap = trimap.clone().detach().long()
         
         return image, class_id, bbox, trimap
@@ -145,17 +123,5 @@ def get_dataloaders(root_dir, batch_size=16):
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    
-    return train_loader, val_loader
 
-    # ---------------------------------
-    # --- TEMPORARY DEBUGGING BLOCK ---
-    # Keep only 100 images for training and 20 for validation
-    # train_dataset.samples = train_dataset.samples[:100]
-    # val_dataset.samples = val_dataset.samples[:20]
-    # ---------------------------------
-    
-    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True)
-    # val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    
-    # return train_loader, val_loader
+    return train_loader, val_loader

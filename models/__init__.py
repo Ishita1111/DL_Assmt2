@@ -1,7 +1,4 @@
-"""Model package exports for Assignment-2 skeleton.
-
-Import from this package in training/inference scripts to keep paths stable.
-"""
+"""Stable imports for train / experiments (`from models import ...`)."""
 
 from .layers import CustomDropout
 from .localization import VGG11Localizer
