@@ -605,16 +605,29 @@ def task_2_4(checkpoint_path=os.path.join(_PROJECT_ROOT, "checkpoints", "classif
 
     if dog_image_path is not None:
         img_pil = Image.open(dog_image_path).convert("RGB")
+    # else:
+    #     # Pull first image from val loader and use it
+    #     _, val_loader = get_dataloaders(root_dir=DATA_PATH, batch_size=1)
+    #     raw_img, _, _, _ = next(iter(val_loader))
+    #     # Denormalise for display
+    #     mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+    #     std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+    #     img_display = (raw_img[0] * std + mean).clamp(0, 1)
+    #     input_tensor = raw_img.to(device)
+    #     img_pil = None   # already have tensor
+
     else:
-        # Pull first image from val loader and use it
+        # Search val loader for a dog image (class_id >= 12 are dogs)
         _, val_loader = get_dataloaders(root_dir=DATA_PATH, batch_size=1)
-        raw_img, _, _, _ = next(iter(val_loader))
-        # Denormalise for display
         mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
         std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
-        img_display = (raw_img[0] * std + mean).clamp(0, 1)
-        input_tensor = raw_img.to(device)
-        img_pil = None   # already have tensor
+        for raw_img, label, _, _ in val_loader:
+            if label.item() >= 12:   # dog class
+                img_display  = (raw_img[0] * std + mean).clamp(0, 1)
+                input_tensor = raw_img.to(device)
+                print(f"  Found dog image with class_id={label.item()}")
+                break
+        img_pil = None
 
     if img_pil is not None:
         input_tensor  = transform(img_pil).unsqueeze(0).to(device)
